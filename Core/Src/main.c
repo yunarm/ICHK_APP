@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "host_protocol.h"
 #include "led_driver.h"
+#include "status_led.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -113,6 +114,11 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    HostProtocol_Poll();
+    LED_DriverPoll();
+	StatusLed_ActivityPoll();	// 이 5Hz로 토글
+	StatusLed_HeartbeatPoll();
+	__WFI();   // 여기서 멈춰있다가, 다음 인터럽트(SysTick 등)가 오면 깨어남
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

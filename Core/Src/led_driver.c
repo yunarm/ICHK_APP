@@ -27,6 +27,9 @@ static const SelLine_t selLines[BAR_COUNT] = {
 static uint32_t ccrBufPortA[CCR_BUF_LEN];
 static uint32_t ccrBufPortB[CCR_BUF_LEN];
 
+static volatile bool portReady[2] = { true, true };
+volatile uint32_t g_ledDmaStartErrors;
+
 static uint8_t currentBarPortA = 0; /* 0..3  (BAR 0~3) */
 static uint8_t currentBarPortB = 4; /* 4..7  (BAR 4~7) */
 
@@ -44,7 +47,10 @@ static void EncodeBar(const uint8_t *data90, uint32_t *ccrBufOut)
         EncodeByte(data90[i], &ccrBufOut[idx]);
         idx += 8u;
     }
-    ccrBufOut[idx] = WS_CCR_DUMMY; /* 래치용 dummy - 듀티 0 고정 */
+    /* Several zero entries ensure the last data pulse AND preload pipeline
+     * have finished before stopping a channel. Deselected BARs remain low
+     * while the other three BARs are scanned, providing the latch interval. */
+    while (idx < CCR_BUF_LEN) ccrBufOut[idx++] = WS_CCR_DUMMY;
 }
 
 static void StartPortTransfer(uint8_t portGroup)
@@ -52,21 +58,36 @@ static void StartPortTransfer(uint8_t portGroup)
     uint8_t barIdx = (portGroup == 0) ? currentBarPortA : currentBarPortB;
     uint32_t *ccrBuf = (portGroup == 0) ? ccrBufPortA : ccrBufPortB;
 
-    const uint8_t *data90 = HostProtocol_GetBarData(barIdx);
-    if (data90 != NULL) {
+    uint8_t data90[FRAME_DATA_LEN];
+    if (HostProtocol_CopyBarData(barIdx, data90)) {
         EncodeBar(data90, ccrBuf);
     } else {
         for (uint16_t i = 0; i < CCR_BUF_LEN; i++) {
-            ccrBuf[i] = WS_CCR_0; /* 데이터 없으면 안전하게 전부 꺼진 상태로 */
+            ccrBuf[i] = (i < CHIPS_PER_BAR * BITS_PER_CHIP) ? WS_CCR_0 : WS_CCR_DUMMY; /* 데이터 없으면 안전하게 전부 꺼진 상태로 */
         }
     }
 
+    /* The finished transfer leaves the active CCR at zero. If both
+     * channels are stopped, reset the shared counter/preload while safe. */
+    if ((htim3.Instance->CR1 & TIM_CR1_CEN) == 0u) {
+        __HAL_TIM_SET_COUNTER(&htim3, 0);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0);
+        htim3.Instance->EGR = TIM_EGR_UG;
+    }
+    portReady[portGroup] = false;
     HAL_GPIO_WritePin(selLines[barIdx].port, selLines[barIdx].pin, GPIO_PIN_SET);
+    HAL_StatusTypeDef result;
 
     if (portGroup == 0) {
-        HAL_TIM_PWM_Start_DMA(&htim3, TIM_CHANNEL_1, ccrBuf, CCR_BUF_LEN);
+        result = HAL_TIM_PWM_Start_DMA(&htim3, TIM_CHANNEL_1, ccrBuf, CCR_BUF_LEN);
     } else {
-        HAL_TIM_PWM_Start_DMA(&htim3, TIM_CHANNEL_2, ccrBuf, CCR_BUF_LEN);
+        result = HAL_TIM_PWM_Start_DMA(&htim3, TIM_CHANNEL_2, ccrBuf, CCR_BUF_LEN);
+    }
+    if (result != HAL_OK) {
+        HAL_GPIO_WritePin(selLines[barIdx].port, selLines[barIdx].pin, GPIO_PIN_RESET);
+        g_ledDmaStartErrors++;
+        Error_Handler();
     }
 }
 
@@ -75,8 +96,17 @@ void LED_DriverInit(void)
     for (uint8_t i = 0; i < BAR_COUNT; i++) {
         HAL_GPIO_WritePin(selLines[i].port, selLines[i].pin, GPIO_PIN_RESET);
     }
-    StartPortTransfer(0);
-    StartPortTransfer(1);
+    currentBarPortA = 0;
+    currentBarPortB = 4;
+    portReady[0] = portReady[1] = true;
+    g_ledDmaStartErrors = 0;
+}
+
+/* Encoding takes place only in main, never in a DMA interrupt. */
+void LED_DriverPoll(void)
+{
+    if (portReady[0]) StartPortTransfer(0);
+    if (portReady[1]) StartPortTransfer(1);
 }
 
 void LED_OnPortTransferComplete(uint8_t portGroup)
@@ -85,12 +115,12 @@ void LED_OnPortTransferComplete(uint8_t portGroup)
         HAL_TIM_PWM_Stop_DMA(&htim3, TIM_CHANNEL_1);
         HAL_GPIO_WritePin(selLines[currentBarPortA].port, selLines[currentBarPortA].pin, GPIO_PIN_RESET);
         currentBarPortA = (uint8_t)((currentBarPortA + 1u) % 4u);
-        StartPortTransfer(0);
+        portReady[0] = true;
     } else {
         HAL_TIM_PWM_Stop_DMA(&htim3, TIM_CHANNEL_2);
         HAL_GPIO_WritePin(selLines[currentBarPortB].port, selLines[currentBarPortB].pin, GPIO_PIN_RESET);
         currentBarPortB = (uint8_t)(4u + ((currentBarPortB - 4u + 1u) % 4u));
-        StartPortTransfer(1);
+        portReady[1] = true;
     }
 }
 

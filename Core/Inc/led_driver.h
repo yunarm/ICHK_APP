@@ -19,9 +19,11 @@
 
 #define CHIPS_PER_BAR          30u
 #define BITS_PER_CHIP          24u
-#define CCR_BUF_LEN  (CHIPS_PER_BAR * BITS_PER_CHIP + 1u) /* 721: 720 data + 1 dummy */
+#define CCR_BUF_LEN  (CHIPS_PER_BAR * BITS_PER_CHIP + 3u) /* 720 data + 3 low pipeline slots */
 
 void LED_DriverInit(void);
+void LED_DriverPoll(void); /* Call on every main-loop iteration. */
+extern volatile uint32_t g_ledDmaStartErrors;
 
 /* HAL_TIM_PWM_PulseFinishedCallback 에서 호출됨 (led_driver.c 내부에 구현) */
 void LED_OnPortTransferComplete(uint8_t portGroup /* 0=A, 1=B */);
